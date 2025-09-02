@@ -47,7 +47,7 @@ impl CharmsSP1Prover for NetworkProver {
         let proof = self
             .prove(pk, stdin)
             .mode(kind)
-            .gas_limit(10_000_000)
+            .gas_limit(4_000_000)
             .skip_simulation(true)
             .strategy(FulfillmentStrategy::Auction)
             .run()?;
