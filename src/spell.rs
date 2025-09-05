@@ -1,7 +1,7 @@
 use crate::{
     PROOF_WRAPPER_BINARY, SPELL_CHECKER_BINARY, SPELL_CHECKER_VK, app,
     cli::{BITCOIN, CARDANO, charms_fee_settings, prove_impl},
-    tx::{bitcoin_tx, cardano_tx, txs_by_txid},
+    tx::{bitcoin_tx, bitcoin_tx::from_spell, cardano_tx, txs_by_txid},
     utils,
     utils::{BoxedSP1Prover, Shared},
 };
@@ -970,9 +970,22 @@ impl ProveSpellTxImpl {
 
                 let funding_utxo_sats = prove_request.funding_utxo_value;
 
+                let bitcoin_tx = from_spell(&prove_request.spell)?;
+                let tx_size = bitcoin_tx.0.vsize();
+                let norm_spell = prove_request.spell.normalized()?;
+                let spell_cbor = util::write(&norm_spell)?;
+                let num_inputs = bitcoin_tx.0.input.len();
+
                 ensure!(
-                    total_sats_in + funding_utxo_sats > total_sats_out + charms_fee,
-                    "total input value must be greater than total output value plus charms fee"
+                    total_sats_in + funding_utxo_sats
+                        > total_sats_out
+                            + charms_fee
+                            + (600
+                                + spell_cbor.len() as u64
+                                + tx_size as u64
+                                + 40 * num_inputs as u64)
+                                * prove_request.fee_rate as u64,
+                    "total input value must be greater than total output value plus fees"
                 );
 
                 tracing::info!(total_sats_in, funding_utxo_sats, total_sats_out, charms_fee);
