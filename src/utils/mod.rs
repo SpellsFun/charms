@@ -12,6 +12,8 @@ pub mod prover;
 #[cfg(feature = "prover")]
 pub(crate) mod sp1;
 
+pub const TRANSIENT_PROVER_FAILURE: &str = " transient prover failure:";
+
 pub type BoxedSP1Prover = Box<dyn CharmsSP1Prover>;
 
 /// Create a string representation of the index `i` in the format `$xxxx`.

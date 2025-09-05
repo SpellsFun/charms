@@ -3,7 +3,7 @@ use crate::{
     cli::{BITCOIN, CARDANO, charms_fee_settings, prove_impl},
     tx::{bitcoin_tx, bitcoin_tx::from_spell, cardano_tx, txs_by_txid},
     utils,
-    utils::{BoxedSP1Prover, Shared},
+    utils::{BoxedSP1Prover, Shared, TRANSIENT_PROVER_FAILURE},
 };
 use anyhow::{anyhow, bail, ensure};
 use ark_bls12_381::Bls12_381;
@@ -460,11 +460,11 @@ impl Prove for Prover {
         stdin.write_vec(proof.public_values.to_vec());
         stdin.write_proof(*compressed_proof, self.spell_checker_vk.vk.clone());
 
-        let (proof, spell_cycles) = self.wrapper_prover_client.get().prove(
-            &self.proof_wrapper_pk,
-            &stdin,
-            SP1ProofMode::Groth16,
-        )?;
+        let (proof, spell_cycles) = self
+            .wrapper_prover_client
+            .get()
+            .prove(&self.proof_wrapper_pk, &stdin, SP1ProofMode::Groth16)
+            .map_err(|e| anyhow!("{} SNARK wrapper: {}", TRANSIENT_PROVER_FAILURE, e))?;
         let norm_spell = clear_inputs(norm_spell);
         let proof = proof.bytes();
 

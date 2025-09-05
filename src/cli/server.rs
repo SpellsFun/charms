@@ -1,6 +1,7 @@
 use crate::{
     cli::ServerConfig,
     spell::{ProveRequest, ProveSpellTx, ProveSpellTxImpl},
+    utils::TRANSIENT_PROVER_FAILURE,
 };
 use anyhow::Result;
 use axum::{
@@ -74,9 +75,11 @@ async fn prove_spell(
     State(prover): State<Arc<ProveSpellTxImpl>>,
     Json(payload): Json<ProveRequest>,
 ) -> Result<Json<Vec<String>>, (StatusCode, Json<String>)> {
-    let result = prover
-        .prove_spell_tx(payload)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(e.to_string())))?;
+    let result = prover.prove_spell_tx(payload).await.map_err(|e| {
+        if e.to_string().contains(TRANSIENT_PROVER_FAILURE) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string()));
+        }
+        (StatusCode::BAD_REQUEST, Json(e.to_string()))
+    })?;
     Ok(Json(result))
 }

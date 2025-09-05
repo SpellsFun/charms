@@ -2,11 +2,11 @@
 //!
 //! A prover that uses the CUDA to execute and prove programs.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use sp1_core_machine::io::SP1Stdin;
 use sp1_prover::{SP1Prover, components::CpuProverComponents};
 
-use crate::utils::{prover::CharmsSP1Prover, sp1::cuda::SP1CudaProver};
+use crate::utils::{TRANSIENT_PROVER_FAILURE, prover::CharmsSP1Prover, sp1::cuda::SP1CudaProver};
 use sp1_sdk::{
     Prover, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey,
 };
@@ -104,5 +104,6 @@ impl CharmsSP1Prover for CudaProver {
         kind: SP1ProofMode,
     ) -> anyhow::Result<(SP1ProofWithPublicValues, u64)> {
         self.prove_with_cycles(pk, stdin, kind)
+            .map_err(|e| anyhow!("{}: CUDA: {}", TRANSIENT_PROVER_FAILURE, e))
     }
 }
