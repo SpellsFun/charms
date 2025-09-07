@@ -1,3 +1,5 @@
+#[cfg(feature = "prover")]
+use crate::utils::block_on;
 use crate::{
     PROOF_WRAPPER_BINARY, SPELL_CHECKER_BINARY, SPELL_CHECKER_VK, app,
     cli::{BITCOIN, CARDANO, charms_fee_settings, prove_impl},
@@ -32,6 +34,10 @@ use charms_data::{
 };
 use charms_lib::SPELL_VK;
 use const_format::formatcp;
+#[cfg(feature = "prover")]
+use redis::AsyncCommands;
+#[cfg(feature = "prover")]
+use redis_macros::{FromRedisValue, ToRedisArgs};
 #[cfg(not(feature = "prover"))]
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -39,6 +45,8 @@ use serde_with::{IfIsHumanReadable, base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use sp1_prover::{HashableKey, SP1ProvingKey, SP1VerifyingKey};
 use sp1_sdk::{SP1Proof, SP1ProofMode, SP1Stdin};
+#[cfg(feature = "prover")]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
@@ -608,6 +616,9 @@ pub struct ProveSpellTxImpl {
     pub charms_fee_settings: Option<CharmsFee>,
     pub charms_prove_api_url: String,
 
+    #[cfg(feature = "prover")]
+    pub cache_client: Option<(redis::Client, rslock::LockManager)>,
+
     pub prover: Box<dyn Prove>,
     #[cfg(not(feature = "prover"))]
     pub client: Client,
@@ -679,8 +690,12 @@ pub struct MockProver {
 }
 
 impl ProveSpellTxImpl {
-    async fn do_prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<Vec<String>> {
-        let total_app_cycles = self.validate_prove_request(&prove_request)?;
+    fn do_prove_spell_tx(
+        &self,
+        prove_request: ProveRequest,
+        app_cycles: u64,
+    ) -> anyhow::Result<Vec<String>> {
+        let total_app_cycles = app_cycles;
         let ProveRequest {
             spell,
             binaries,
@@ -779,6 +794,28 @@ fn filter_app_binaries(
 const CHARMS_PROVE_API_URL: &'static str =
     formatcp!("https://v{CURRENT_VERSION}.charms.dev/spells/prove");
 
+#[cfg(feature = "prover")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestData {
+    committed_data_hash: [u8; 32],
+}
+
+#[cfg(feature = "prover")]
+#[derive(Clone, Debug, Serialize, Deserialize, FromRedisValue, ToRedisArgs)]
+pub enum ProofState {
+    Processing {
+        request_data: RequestData,
+    },
+    Done {
+        request_data: RequestData,
+        result: Vec<String>,
+    },
+}
+
+pub fn committed_data_hash(normalized_spell: &NormalizedSpell) -> [u8; 32] {
+    Sha256::digest(&util::write(&normalized_spell).unwrap()).into()
+}
+
 impl ProveSpellTx for ProveSpellTxImpl {
     #[tracing::instrument(level = "debug")]
     fn new(mock: bool) -> Self {
@@ -790,6 +827,21 @@ impl ProveSpellTx for ProveSpellTxImpl {
         tracing::info!(charms_prove_api_url);
 
         let prover = prove_impl(mock);
+
+        #[cfg(feature = "prover")]
+        let cache_client: Option<(_, _)> = {
+            let redis_opt = std::env::var("REDIS_URL").ok().map(|redis_url| {
+                let redis_client = redis::Client::open(redis_url)
+                    .map_err(|e| {
+                        tracing::warn!("failed to create a Redis client: {}", e);
+                        e
+                    })
+                    .unwrap();
+                let lock_manager = rslock::LockManager::from_clients(vec![redis_client.clone()]);
+                (redis_client, lock_manager)
+            });
+            redis_opt
+        };
 
         #[cfg(not(feature = "prover"))]
         let client = Client::builder()
@@ -804,6 +856,8 @@ impl ProveSpellTx for ProveSpellTxImpl {
             mock,
             charms_fee_settings,
             charms_prove_api_url,
+            #[cfg(feature = "prover")]
+            cache_client,
             prover,
             #[cfg(not(feature = "prover"))]
             client,
@@ -812,17 +866,93 @@ impl ProveSpellTx for ProveSpellTxImpl {
 
     #[cfg(feature = "prover")]
     async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<Vec<String>> {
-        self.do_prove_spell_tx(prove_request).await
+        let (norm_spell, app_cycles) = self.validate_prove_request(&prove_request)?;
+
+        if let Some((cache_client, lock_manager)) = self.cache_client.as_ref() {
+            let request_key = prove_request.funding_utxo.to_string();
+            let lock_key = format!("LOCK_{}", request_key.as_str());
+            let committed_data_hash = committed_data_hash(&norm_spell);
+
+            let mut con = cache_client.get_multiplexed_async_connection().await?;
+
+            loop {
+                match con.get(request_key.as_str()).await? {
+                    Some(ProofState::Done { request_data, .. })
+                    | Some(ProofState::Processing { request_data, .. })
+                        if request_data.committed_data_hash != committed_data_hash =>
+                    {
+                        bail!("duplicate funding UTXO spend with different spell");
+                    }
+                    Some(ProofState::Done { result, .. }) => {
+                        return Ok(result);
+                    }
+                    _ => {
+                        const LOCK_TTL: Duration = Duration::from_secs(5);
+
+                        let mut con = con.clone();
+                        let request_key = request_key.clone();
+
+                        let result: Vec<String> = lock_manager
+                            .using(lock_key.as_bytes(), LOCK_TTL, || async move {
+                                match con.get(request_key.as_str()).await? {
+                                    Some(ProofState::Done { request_data, .. })
+                                    | Some(ProofState::Processing { request_data, .. })
+                                        if request_data.committed_data_hash
+                                            != committed_data_hash =>
+                                    {
+                                        bail!("duplicate funding UTXO spend with different spell");
+                                    }
+                                    Some(ProofState::Done { result, .. }) => {
+                                        return Ok(result);
+                                    }
+                                    _ => {}
+                                };
+
+                                let _: () = block_on(con.set(
+                                    request_key.as_str(),
+                                    ProofState::Processing {
+                                        request_data: RequestData {
+                                            committed_data_hash,
+                                        },
+                                    },
+                                ))?;
+
+                                let r: Vec<String> =
+                                    self.do_prove_spell_tx(prove_request, app_cycles)?;
+
+                                let _: () = block_on(con.set(
+                                    request_key.as_str(),
+                                    ProofState::Done {
+                                        request_data: RequestData {
+                                            committed_data_hash,
+                                        },
+                                        result: r.clone(),
+                                    },
+                                ))?;
+
+                                Ok::<_, anyhow::Error>(r)
+                            })
+                            .await??;
+
+                        // TODO save permanent error to the cache
+
+                        return Ok(result);
+                    }
+                }
+            }
+        } else {
+            self.do_prove_spell_tx(prove_request, app_cycles)
+        }
     }
 
     #[cfg(not(feature = "prover"))]
     #[tracing::instrument(level = "info", skip_all)]
     async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<Vec<String>> {
+        let (_norm_spell, app_cycles) = self.validate_prove_request(&prove_request)?;
         if self.mock {
-            return Self::do_prove_spell_tx(self, prove_request).await;
+            return Self::do_prove_spell_tx(self, prove_request, app_cycles);
         }
 
-        self.validate_prove_request(&prove_request)?;
         let response = retry(0, || async {
             let response = self
                 .client
@@ -894,7 +1024,10 @@ fn ensure_all_prev_txs_are_present(
 }
 
 impl ProveSpellTxImpl {
-    pub fn validate_prove_request(&self, prove_request: &ProveRequest) -> anyhow::Result<u64> {
+    pub fn validate_prove_request(
+        &self,
+        prove_request: &ProveRequest,
+    ) -> anyhow::Result<(NormalizedSpell, u64)> {
         let prev_txs = &prove_request.prev_txs;
         let prev_txs = from_hex_txs(&prev_txs)?;
         let prev_txs_by_id = txs_by_txid(&prev_txs);
@@ -996,7 +1129,7 @@ impl ProveSpellTxImpl {
             }
             _ => bail!("unsupported chain: {}", prove_request.chain.as_str()),
         }
-        Ok(total_cycles)
+        Ok((norm_spell, total_cycles))
     }
 }
 

@@ -39,7 +39,10 @@ clap_complete = { version = "4.5.57" }
 cml-chain = { workspace = true }
 const_format = { version = "0.2.34" }
 hex = { workspace = true }
+redis = { version = "0.32.5", optional = true, features = ["tokio-rustls-comp"] }
+redis-macros = { version = "0.5.6" }
 reqwest = { version = "0.12.23", features = ["json"] }
+rslock = { version = "0.7.3", optional = true, features = ["tokio-comp"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_with = { version = "3.14.0", features = ["base64"] }
@@ -60,7 +63,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 twirp = { package = "twirp-rs", version = "0.13.0-succinct" }
 
 [features]
-prover = ["sp1-sdk/native-gnark", "sp1-prover/native-gnark"]
+prover = ["sp1-sdk/native-gnark", "sp1-prover/native-gnark", "redis", "rslock"]
 none = []
 
 [dev-dependencies]
