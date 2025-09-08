@@ -875,69 +875,64 @@ impl ProveSpellTx for ProveSpellTxImpl {
 
             let mut con = cache_client.get_multiplexed_async_connection().await?;
 
-            loop {
-                match con.get(request_key.as_str()).await? {
-                    Some(ProofState::Done { request_data, .. })
-                    | Some(ProofState::Processing { request_data, .. })
-                        if request_data.committed_data_hash != committed_data_hash =>
-                    {
-                        bail!("duplicate funding UTXO spend with different spell");
-                    }
-                    Some(ProofState::Done { result, .. }) => {
-                        return Ok(result);
-                    }
-                    _ => {
-                        const LOCK_TTL: Duration = Duration::from_secs(5);
+            match con.get(request_key.as_str()).await? {
+                Some(ProofState::Done { request_data, .. })
+                | Some(ProofState::Processing { request_data, .. })
+                    if request_data.committed_data_hash != committed_data_hash =>
+                {
+                    bail!("duplicate funding UTXO spend with different spell");
+                }
+                Some(ProofState::Done { result, .. }) => Ok(result),
+                _ => {
+                    const LOCK_TTL: Duration = Duration::from_secs(5);
 
-                        let mut con = con.clone();
-                        let request_key = request_key.clone();
+                    let mut con = con.clone();
+                    let request_key = request_key.clone();
 
-                        let result: Vec<String> = lock_manager
-                            .using(lock_key.as_bytes(), LOCK_TTL, || async move {
-                                match con.get(request_key.as_str()).await? {
-                                    Some(ProofState::Done { request_data, .. })
-                                    | Some(ProofState::Processing { request_data, .. })
-                                        if request_data.committed_data_hash
-                                            != committed_data_hash =>
-                                    {
-                                        bail!("duplicate funding UTXO spend with different spell");
-                                    }
-                                    Some(ProofState::Done { result, .. }) => {
-                                        return Ok(result);
-                                    }
-                                    _ => {}
-                                };
+                    let result: Vec<String> = lock_manager
+                        .using(lock_key.as_bytes(), LOCK_TTL, || async move {
+                            match con.get(request_key.as_str()).await? {
+                                Some(ProofState::Done { request_data, .. })
+                                | Some(ProofState::Processing { request_data, .. })
+                                    if request_data.committed_data_hash != committed_data_hash =>
+                                {
+                                    bail!("duplicate funding UTXO spend with different spell");
+                                }
+                                Some(ProofState::Done { result, .. }) => {
+                                    return Ok(result);
+                                }
+                                _ => {}
+                            };
 
-                                let _: () = block_on(con.set(
-                                    request_key.as_str(),
-                                    ProofState::Processing {
-                                        request_data: RequestData {
-                                            committed_data_hash,
-                                        },
+                            let _: () = block_on(con.set(
+                                request_key.as_str(),
+                                ProofState::Processing {
+                                    request_data: RequestData {
+                                        committed_data_hash,
                                     },
-                                ))?;
+                                },
+                            ))?;
 
-                                let r: Vec<String> =
-                                    self.do_prove_spell_tx(prove_request, app_cycles)?;
+                            let r: Vec<String> =
+                                self.do_prove_spell_tx(prove_request, app_cycles)?;
 
-                                let _: () = block_on(con.set(
-                                    request_key.as_str(),
-                                    ProofState::Done {
-                                        request_data: RequestData {
-                                            committed_data_hash,
-                                        },
-                                        result: r.clone(),
+                            let _: () = block_on(con.set(
+                                request_key.as_str(),
+                                ProofState::Done {
+                                    request_data: RequestData {
+                                        committed_data_hash,
                                     },
-                                ))?;
+                                    result: r.clone(),
+                                },
+                            ))?;
 
-                                Ok::<_, anyhow::Error>(r)
-                            })
-                            .await??;
+                            Ok::<_, anyhow::Error>(r)
+                        })
+                        .await??;
 
-                        // TODO save permanent error to the cache
+                    // TODO save permanent error to the cache
 
-                        return Ok(result);
-                    }
+                    Ok(result)
                 }
             }
         } else {
