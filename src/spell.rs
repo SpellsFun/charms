@@ -1093,30 +1093,37 @@ impl ProveSpellTxImpl {
                     .sum();
                 let total_sats_out: u64 = (&prove_request.spell.outs)
                     .iter()
-                    .map(|o| o.amount.unwrap_or_default())
+                    .map(|o| o.amount.unwrap_or(1000))
                     .sum();
 
                 let funding_utxo_sats = prove_request.funding_utxo_value;
 
                 let bitcoin_tx = from_spell(&prove_request.spell)?;
                 let tx_size = bitcoin_tx.0.vsize();
-                let norm_spell = prove_request.spell.normalized()?;
-                let spell_cbor = util::write(&norm_spell)?;
+                let (mut norm_spell, ..) = prove_request.spell.normalized()?;
+                norm_spell.tx.ins = None;
+                let proof_dummy: Vec<u8> = vec![0xff; 128];
+                let spell_cbor = util::write(&(norm_spell, proof_dummy))?;
                 let num_inputs = bitcoin_tx.0.input.len();
+                let estimated_bitcoin_fee: u64 = (111
+                    + (spell_cbor.len() as u64 + 372) / 4
+                    + tx_size as u64
+                    + 28 * num_inputs as u64)
+                    * prove_request.fee_rate as u64;
+
+                tracing::info!(
+                    total_sats_in,
+                    funding_utxo_sats,
+                    total_sats_out,
+                    charms_fee,
+                    estimated_bitcoin_fee
+                );
 
                 ensure!(
                     total_sats_in + funding_utxo_sats
-                        > total_sats_out
-                            + charms_fee
-                            + (600
-                                + spell_cbor.len() as u64
-                                + tx_size as u64
-                                + 40 * num_inputs as u64)
-                                * prove_request.fee_rate as u64,
-                    "total input value must be greater than total output value plus fees"
+                        > total_sats_out + charms_fee + estimated_bitcoin_fee,
+                    "total inputs value must be greater than total outputs value plus fees"
                 );
-
-                tracing::info!(total_sats_in, funding_utxo_sats, total_sats_out, charms_fee);
             }
             CARDANO => {
                 // TODO
