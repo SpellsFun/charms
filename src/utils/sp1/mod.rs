@@ -9,6 +9,7 @@ use sp1_prover::{SP1Prover, components::CpuProverComponents};
 use crate::utils::{TRANSIENT_PROVER_FAILURE, prover::CharmsSP1Prover, sp1::cuda::SP1CudaProver};
 use sp1_sdk::{
     Prover, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey,
+    install::try_install_circuit_artifacts,
 };
 
 pub mod cuda;
@@ -65,7 +66,32 @@ impl CudaProver {
             return Ok((proof_with_pv, cycles));
         }
 
-        unreachable!()
+        // Generate the shrink proof.
+        let compress_proof = self.cuda_prover.shrink(reduce_proof)?;
+
+        // Generate the wrap proof.
+        let outer_proof = self.cuda_prover.wrap_bn254(compress_proof)?;
+
+        // Generate the gnark proof.
+        match kind {
+            SP1ProofMode::Groth16 => {
+                let groth16_bn254_artifacts = try_install_circuit_artifacts("groth16");
+
+                let proof = self
+                    .cpu_prover
+                    .wrap_groth16_bn254(outer_proof, &groth16_bn254_artifacts);
+                Ok((
+                    SP1ProofWithPublicValues {
+                        proof: SP1Proof::Groth16(proof),
+                        public_values,
+                        sp1_version: self.version().to_string(),
+                        tee_proof: None,
+                    },
+                    0,
+                ))
+            }
+            _ => unreachable!(),
+        }
     }
 }
 

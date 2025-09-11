@@ -4,10 +4,13 @@ use async_trait::async_trait;
 use reqwest::{Request, Response};
 use sp1_core_machine::{io::SP1Stdin, reduce::SP1ReduceProof, utils::SP1CoreProverError};
 use sp1_cuda::{
-    CompressRequestPayload, StatelessProveCoreRequestPayload, block_on,
+    CompressRequestPayload, ShrinkRequestPayload, StatelessProveCoreRequestPayload,
+    WrapRequestPayload, block_on,
     proto::api::{ProverServiceClient, ReadyRequest},
 };
-use sp1_prover::{InnerSC, SP1CoreProof, SP1ProvingKey, SP1RecursionProverError, SP1VerifyingKey};
+use sp1_prover::{
+    InnerSC, OuterSC, SP1CoreProof, SP1ProvingKey, SP1RecursionProverError, SP1VerifyingKey,
+};
 use std::io;
 use twirp::{
     Client, Middleware, Next, async_trait,
@@ -25,6 +28,8 @@ pub struct SP1CudaProver {
     pub client: Client,
 }
 
+const RETRY_SECS: u64 = 60;
+
 impl SP1CudaProver {
     /// Creates a new [SP1Prover] that runs inside a Docker container and returns a
     /// [SP1ProverClient] that can be used to communicate with the container.
@@ -41,7 +46,7 @@ impl SP1CudaProver {
     #[tracing::instrument(level = "info", skip_all)]
     pub fn ready(&self) -> anyhow::Result<()> {
         tracing::info!("waiting for proving server to be ready");
-        block_on(retry(30, || async {
+        block_on(retry(RETRY_SECS, || async {
             match self.client.ready(ReadyRequest {}).await {
                 Ok(response) if response.ready => Ok(()),
                 Ok(_) => bail!("proving server is not ready"),
@@ -67,7 +72,7 @@ impl SP1CudaProver {
             data: bincode::serialize(&payload)
                 .map_err(|e| SP1CoreProverError::SerializationError(e))?,
         };
-        let response = block_on(retry(30, || {
+        let response = block_on(retry(RETRY_SECS, || {
             self.client.prove_core_stateless(request.clone())
         }))
         .map_err(|e| {
@@ -99,9 +104,51 @@ impl SP1CudaProver {
                 .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?,
         };
 
-        let response = block_on(retry(30, || self.client.compress(request.clone())))
+        let response = block_on(retry(RETRY_SECS, || self.client.compress(request.clone())))
             .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
         let proof: SP1ReduceProof<InnerSC> = bincode::deserialize(&response.result)
+            .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
+        Ok(proof)
+    }
+
+    /// Executes the [sp1_prover::SP1Prover::shrink] method inside the container.
+    ///
+    /// You will need at least 24GB of VRAM to run this method.
+    pub fn shrink(
+        &self,
+        reduced_proof: SP1ReduceProof<InnerSC>,
+    ) -> sp1_cuda::Result<SP1ReduceProof<InnerSC>, SP1RecursionProverError> {
+        let payload = ShrinkRequestPayload {
+            reduced_proof: reduced_proof.clone(),
+        };
+        let request = sp1_cuda::proto::api::ShrinkRequest {
+            data: bincode::serialize(&payload).unwrap(),
+        };
+
+        let response = block_on(retry(RETRY_SECS, || self.client.shrink(request.clone())))
+            .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
+        let proof: SP1ReduceProof<InnerSC> = bincode::deserialize(&response.result)
+            .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
+        Ok(proof)
+    }
+
+    /// Executes the [sp1_prover::SP1Prover::wrap_bn254] method inside the container.
+    ///
+    /// You will need at least 24GB of VRAM to run this method.
+    pub fn wrap_bn254(
+        &self,
+        reduced_proof: SP1ReduceProof<InnerSC>,
+    ) -> sp1_cuda::Result<SP1ReduceProof<OuterSC>, SP1RecursionProverError> {
+        let payload = WrapRequestPayload {
+            reduced_proof: reduced_proof.clone(),
+        };
+        let request = sp1_cuda::proto::api::WrapRequest {
+            data: bincode::serialize(&payload).unwrap(),
+        };
+
+        let response = block_on(retry(RETRY_SECS, || self.client.wrap(request.clone())))
+            .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
+        let proof: SP1ReduceProof<OuterSC> = bincode::deserialize(&response.result)
             .map_err(|e| SP1RecursionProverError::RuntimeError(e.to_string()))?;
         Ok(proof)
     }
