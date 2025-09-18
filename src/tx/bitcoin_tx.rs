@@ -252,11 +252,13 @@ pub fn tx_total_amount_out(tx: &Transaction) -> Amount {
     tx.output.iter().map(|tx_out| tx_out.value).sum::<Amount>()
 }
 
+const MIN_SATS_FOR_ALL_ADDRESS_TYPES: u64 = 546;
+
 pub fn tx_output(outs: &[Output]) -> anyhow::Result<Vec<TxOut>> {
     let tx_outputs = outs
         .iter()
         .map(|u| {
-            let value = Amount::from_sat(u.amount.unwrap_or(1000)); // TODO make a constant
+            let value = Amount::from_sat(u.amount.unwrap_or(MIN_SATS_FOR_ALL_ADDRESS_TYPES));
             let address = u
                 .address
                 .as_ref()
