@@ -252,7 +252,7 @@ pub fn tx_total_amount_out(tx: &Transaction) -> Amount {
     tx.output.iter().map(|tx_out| tx_out.value).sum::<Amount>()
 }
 
-const MIN_SATS_FOR_ALL_ADDRESS_TYPES: u64 = 546;
+const MIN_SATS_FOR_ALL_ADDRESS_TYPES: u64 = 547;
 
 pub fn tx_output(outs: &[Output]) -> anyhow::Result<Vec<TxOut>> {
     let tx_outputs = outs
