@@ -26,9 +26,6 @@ COPY charms-lib/Cargo.toml charms-lib/
 COPY charms-proof-wrapper/Cargo.toml charms-proof-wrapper/
 COPY charms-sdk/Cargo.toml charms-sdk/
 
-# 预先拉取依赖，避免频繁重编译
-RUN cargo fetch
-
 # 复制全部源码并进行发布构建
 COPY . .
 RUN cargo build --release --features prover --bin charms
