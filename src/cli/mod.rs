@@ -47,6 +47,10 @@ pub struct ServerConfig {
     /// Port to listen on, defaults to 17784.
     #[arg(long, default_value = "17784")]
     port: u16,
+
+    /// Bearer token required in the `Authorization` header for API requests.
+    #[arg(long, env = "CHARMS_SERVER_AUTH_TOKEN", hide_env_values = true)]
+    auth_token: Option<String>,
 }
 
 #[derive(Subcommand)]

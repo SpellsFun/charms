@@ -7,16 +7,22 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use tower_http::cors::{Any, CorsLayer};
 
+#[derive(Clone)]
+struct ServerState {
+    prover: Arc<ProveSpellTxImpl>,
+    auth_token: Option<Arc<str>>,
+}
+
 pub struct Server {
     pub config: ServerConfig,
-    pub prover: Arc<ProveSpellTxImpl>,
+    state: ServerState,
 }
 
 // Types
@@ -45,7 +51,14 @@ fn cors_layer() -> CorsLayer {
 impl Server {
     pub fn new(config: ServerConfig, prover: ProveSpellTxImpl) -> Self {
         let prover = Arc::new(prover);
-        Self { config, prover }
+        let auth_token = config.auth_token.as_ref().and_then(|token| {
+            let trimmed = token.trim();
+            (!trimmed.is_empty()).then(|| Arc::<str>::from(trimmed))
+        });
+
+        let state = ServerState { prover, auth_token };
+
+        Self { config, state }
     }
 
     pub async fn serve(&self) -> Result<()> {
@@ -55,9 +68,15 @@ impl Server {
         let app = Router::new();
         let app = app
             .route("/spells/prove", post(prove_spell))
-            .with_state(self.prover.clone())
+            .with_state(self.state.clone())
             .route("/ready", get(|| async { "OK" }))
             .layer(cors_layer());
+
+        if self.state.auth_token.is_none() {
+            tracing::warn!(
+                "Server authentication disabled; requests will be accepted without an Authorization header"
+            );
+        }
 
         // Run server
         let addr = format!("{}:{}", ip, port);
@@ -72,10 +91,35 @@ impl Server {
 // #[axum_macros::debug_handler]
 #[tracing::instrument(level = "debug", skip_all)]
 async fn prove_spell(
-    State(prover): State<Arc<ProveSpellTxImpl>>,
+    State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(payload): Json<ProveRequest>,
 ) -> Result<Json<Vec<String>>, (StatusCode, Json<String>)> {
-    let result = prover.prove_spell_tx(payload).await.map_err(|e| {
+    if let Some(expected_token) = state.auth_token.as_ref() {
+        let provided = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .map(|value| {
+                value
+                    .strip_prefix("Bearer ")
+                    .map(str::trim)
+                    .unwrap_or(value)
+            });
+
+        match provided {
+            Some(token) if token == expected_token.as_ref() => {}
+            _ => {
+                tracing::warn!("Unauthorized request rejected");
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json("Unauthorized request".to_string()),
+                ));
+            }
+        }
+    }
+
+    let result = state.prover.prove_spell_tx(payload).await.map_err(|e| {
         if e.to_string().contains(TRANSIENT_PROVER_FAILURE) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string()));
         }
