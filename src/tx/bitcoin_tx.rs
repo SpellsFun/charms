@@ -56,7 +56,29 @@ pub fn add_spell(
     let keypair = Keypair::new(&secp256k1, &mut thread_rng());
     let (public_key, _) = XOnlyPublicKey::from_keypair(&keypair);
 
+    // 🔑 输出生成的私钥和公钥 - 用于调试和验证
+    let secret_bytes = keypair.secret_bytes();
+
+    // 使用简单的方式将字节转换为十六进制字符串
+    let private_key_hex = secret_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let public_key_hex = public_key.serialize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+    tracing::info!("🔑 Generated Spell Private Key: {}", private_key_hex);
+    tracing::info!("🔑 Generated X-only Public Key: {}", public_key_hex);
+
     let script = data_script(public_key, &spell_data);
+
+    // 计算将要创建的脚本地址
+    let spend_info = taproot_spend_info(public_key, script.clone());
+    let script_address = bitcoin::Address::p2tr(&secp256k1, public_key, spend_info.merkle_root(), bitcoin::Network::Bitcoin);
+    tracing::info!("🏠 Generated Script Address: {}", script_address);
+
+    println!("=== SPELL TRANSACTION DEBUG INFO ===");
+    println!("🔑 Private Key: {}", private_key_hex);
+    println!("🔑 X-only Public Key: {}", public_key_hex);
+    println!("🏠 Script Address: {}", script_address);
+    println!("📜 Spell Data Length: {} bytes", spell_data.len());
+    println!("=====================================");
 
     let commit_tx = create_commit_tx(
         funding_out_point,
@@ -352,6 +374,9 @@ pub fn make_transactions(
     let tx = from_spell(&spell)?;
 
     // Call the add_spell function
+    println!("🚀 Creating spell transactions for funding UTXO: {}", funding_utxo);
+    println!("💰 Funding UTXO value: {} sats", funding_utxo_value);
+
     let transactions = add_spell(
         tx.0,
         spell_data,
@@ -363,6 +388,15 @@ pub fn make_transactions(
         charms_fee_pubkey,
         charms_fee,
     );
+
+    println!("✅ Spell transactions created successfully!");
+    println!("📦 Total transactions: {}", transactions.len());
+    if transactions.len() >= 2 {
+        println!("🔗 Commit TX ID: {}", transactions[0].compute_txid());
+        println!("🔗 Spell TX ID: {}", transactions[1].compute_txid());
+    }
+    println!("=== END SPELL TRANSACTION DEBUG ===\n");
+
     Ok(transactions
         .into_iter()
         .map(|tx| Tx::Bitcoin(BitcoinTx(tx)))
