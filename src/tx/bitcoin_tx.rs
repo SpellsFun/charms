@@ -4,6 +4,7 @@ use crate::{
     spell,
     spell::{CharmsFee, Input, Output, Spell},
 };
+use hex;
 use anyhow::bail;
 use bitcoin::{
     self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, TapLeafHash, TapSighashType,
@@ -73,12 +74,28 @@ pub fn add_spell(
     let script_address = bitcoin::Address::p2tr(&secp256k1, public_key, spend_info.merkle_root(), bitcoin::Network::Bitcoin);
     tracing::info!("🏠 Generated Script Address: {}", script_address);
 
+    // 生成完整的脚本信息用于客户端
+    let control_block = spend_info.control_block(&(script.clone(), bitcoin::taproot::LeafVersion::TapScript)).unwrap();
+    let merkle_root = spend_info.merkle_root();
+
     println!("=== SPELL TRANSACTION DEBUG INFO ===");
     println!("🔑 Private Key: {}", private_key_hex);
     println!("🔑 X-only Public Key: {}", public_key_hex);
     println!("🏠 Script Address: {}", script_address);
     println!("📜 Spell Data Length: {} bytes", spell_data.len());
     println!("=====================================");
+
+    // 为客户端提供完整的脚本信息
+    println!("=== CLIENT SCRIPT INFO ===");
+    println!("🔧 Tapscript: {}", hex::encode(&script));
+    println!("🔧 Control Block: {}", hex::encode(&control_block.serialize()));
+    println!("🔧 Internal Pubkey: {}", public_key_hex);
+    println!("🔧 Merkle Root: {}",
+        merkle_root.map(|hash| hex::encode(hash.as_ref() as &[u8]))
+                   .unwrap_or_else(|| "None".to_string()));
+    println!("🔧 Script Address: {}", script_address);
+    println!("🔧 Network: bitcoin");
+    println!("===========================");
 
     let commit_tx = create_commit_tx(
         funding_out_point,
