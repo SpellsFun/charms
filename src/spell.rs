@@ -661,7 +661,7 @@ pub struct ProveRequest {
     pub chain: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProveResponse {
     pub txs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

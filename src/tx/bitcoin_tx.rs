@@ -53,7 +53,7 @@ pub fn add_spell(
     prev_txs: &BTreeMap<TxId, Tx>,
     charms_fee_pubkey: Option<ScriptBuf>,
     charms_fee: Amount,
-) -> Vec<Transaction> {
+) -> (Vec<Transaction>, String) {
     let secp256k1 = Secp256k1::new();
     let keypair = Keypair::new(&secp256k1, &mut thread_rng());
     let (public_key, _) = XOnlyPublicKey::from_keypair(&keypair);
