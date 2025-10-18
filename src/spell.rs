@@ -3,7 +3,7 @@ use crate::utils::block_on;
 use crate::{
     PROOF_WRAPPER_BINARY, SPELL_CHECKER_BINARY, SPELL_CHECKER_VK, app,
     cli::{BITCOIN, CARDANO, charms_fee_settings, prove_impl},
-    tx::{bitcoin_tx, bitcoin_tx::from_spell, cardano_tx, txs_by_txid},
+    tx::txs_by_txid,
     utils,
     utils::{BoxedSP1Prover, Shared, TRANSIENT_PROVER_FAILURE},
 };
@@ -28,7 +28,7 @@ pub use charms_client::{
     CURRENT_VERSION, NormalizedCharms, NormalizedSpell, NormalizedTransaction, Proof,
     SpellProverInput, to_tx,
 };
-use charms_client::{MOCK_SPELL_VK, bitcoin_tx::BitcoinTx, tx::Tx, well_formed};
+use charms_client::{MOCK_SPELL_VK, tx::Tx, well_formed};
 use charms_data::{
     App, AppInput, B32, Charms, Data, TOKEN, Transaction, TxId, UtxoId, is_simple_transfer, util,
 };
@@ -663,9 +663,9 @@ pub struct ProveRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProveResponse {
-    pub txs: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tapscript: Option<String>,
+    /// Spell data (CBOR encoded spell + proof) in hex
+    /// This is the core data that goes into the tapscript envelope
+    pub spell_data: String,
 }
 
 pub struct Prover {
@@ -702,20 +702,14 @@ impl ProveSpellTxImpl {
         prove_request: ProveRequest,
         app_cycles: u64,
     ) -> anyhow::Result<ProveResponse> {
-        let total_app_cycles = app_cycles;
         let ProveRequest {
             spell,
             binaries,
             prev_txs,
-            funding_utxo,
-            funding_utxo_value,
-            change_address,
-            fee_rate,
-            chain,
+            ..
         } = prove_request;
 
         let prev_txs = from_hex_txs(&prev_txs)?;
-        let prev_txs_by_id = txs_by_txid(&prev_txs);
 
         let (norm_spell, app_private_inputs, tx_ins_beamed_source_utxos) = spell.normalized()?;
 
@@ -728,54 +722,20 @@ impl ProveSpellTxImpl {
         )?;
 
         let total_cycles = if !self.mock {
-            total_app_cycles
+            app_cycles
         } else {
             proof_app_cycles // mock prover computes app run cycles
         };
 
         tracing::info!("proof generated. total app cycles: {}", total_cycles);
 
-        // Serialize spell into CBOR
+        // Serialize spell + proof into CBOR
         let spell_data = util::write(&(&norm_spell, &proof))?;
+        let spell_data_hex = hex::encode(&spell_data);
 
-        let charms_fee = self.charms_fee_settings.clone();
-
-        match chain.as_str() {
-            BITCOIN => {
-                let (txs, tapscript) = bitcoin_tx::make_transactions(
-                    &spell,
-                    funding_utxo,
-                    funding_utxo_value,
-                    &change_address,
-                    &prev_txs_by_id,
-                    &spell_data,
-                    fee_rate,
-                    charms_fee,
-                    total_cycles,
-                )?;
-                Ok(ProveResponse {
-                    txs: to_hex_txs(&txs),
-                    tapscript: Some(tapscript),
-                })
-            }
-            CARDANO => {
-                let txs = cardano_tx::make_transactions(
-                    &spell,
-                    funding_utxo,
-                    funding_utxo_value,
-                    &change_address,
-                    &spell_data,
-                    &prev_txs_by_id,
-                    charms_fee,
-                    total_cycles,
-                )?;
-                Ok(ProveResponse {
-                    txs: to_hex_txs(&txs),
-                    tapscript: None,
-                })
-            }
-            _ => bail!("unsupported chain: {}", chain),
-        }
+        Ok(ProveResponse {
+            spell_data: spell_data_hex,
+        })
     }
 }
 
@@ -1081,62 +1041,8 @@ impl ProveSpellTxImpl {
                     })
                 }));
 
-                let charms_fee = get_charms_fee(&self.charms_fee_settings, total_cycles).to_sat();
-
-                let total_sats_in: u64 = (&prove_request.spell.ins)
-                    .iter()
-                    .map(|i| {
-                        let utxo_id = i.utxo_id.as_ref().expect("utxo_id is expected to be Some");
-                        prev_txs_by_id
-                            .get(&utxo_id.0)
-                            .and_then(|prev_tx| {
-                                if let Tx::Bitcoin(BitcoinTx(prev_tx)) = prev_tx {
-                                    prev_tx
-                                        .output
-                                        .get(utxo_id.1 as usize)
-                                        .map(|o| o.value.to_sat())
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or(anyhow!("utxo not found in prev_txs: {}", utxo_id))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?
-                    .iter()
-                    .sum();
-                let total_sats_out: u64 = (&prove_request.spell.outs)
-                    .iter()
-                    .map(|o| o.amount.unwrap_or(1000))
-                    .sum();
-
-                let funding_utxo_sats = prove_request.funding_utxo_value;
-
-                let bitcoin_tx = from_spell(&prove_request.spell)?;
-                let tx_size = bitcoin_tx.0.vsize();
-                let (mut norm_spell, ..) = prove_request.spell.normalized()?;
-                norm_spell.tx.ins = None;
-                let proof_dummy: Vec<u8> = vec![0xff; 128];
-                let spell_cbor = util::write(&(norm_spell, proof_dummy))?;
-                let num_inputs = bitcoin_tx.0.input.len();
-                let estimated_bitcoin_fee: u64 = (111
-                    + (spell_cbor.len() as u64 + 372) / 4
-                    + tx_size as u64
-                    + 28 * num_inputs as u64)
-                    * prove_request.fee_rate as u64;
-
-                tracing::info!(
-                    total_sats_in,
-                    funding_utxo_sats,
-                    total_sats_out,
-                    charms_fee,
-                    estimated_bitcoin_fee
-                );
-
-                ensure!(
-                    total_sats_in + funding_utxo_sats
-                        > total_sats_out + charms_fee + estimated_bitcoin_fee,
-                    "total inputs value must be greater than total outputs value plus fees"
-                );
+                // Fee validation is now client's responsibility since they construct the transaction
+                tracing::info!("Spell validation passed. Total app cycles: {}", total_cycles);
             }
             CARDANO => {
                 // TODO

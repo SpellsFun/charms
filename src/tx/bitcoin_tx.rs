@@ -1,26 +1,38 @@
 use crate::{
     cli::BITCOIN,
-    script::{control_block, data_script, taproot_spend_info},
+    script::{data_script, taproot_spend_info},
     spell,
     spell::{CharmsFee, Input, Output, Spell},
 };
 use hex;
 use anyhow::bail;
 use bitcoin::{
-    self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, TapLeafHash, TapSighashType,
+    self, Address, Amount, FeeRate, Network, OutPoint, ScriptBuf,
     Transaction, TxIn, TxOut, Txid, Weight, Witness, XOnlyPublicKey,
     absolute::LockTime,
     hashes::Hash,
     key::Secp256k1,
-    secp256k1::{Keypair, Message, rand::thread_rng, schnorr},
-    sighash::{Prevouts, SighashCache},
-    taproot,
-    taproot::LeafVersion,
+    secp256k1::{Keypair, rand::thread_rng},
     transaction::Version,
 };
 use charms_client::{bitcoin_tx::BitcoinTx, tx::Tx};
 use charms_data::{TxId, UtxoId};
+use serde::{Serialize, Deserialize};
 use std::{collections::BTreeMap, str::FromStr};
+
+/// Information needed by the client to sign the tapscript input
+/// NOTE: This struct is kept for backwards compatibility but is no longer used by the simplified API
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScriptSigningInfo {
+    pub tapscript: String,
+    pub control_block: String,
+    pub internal_pubkey: String,
+    pub merkle_root: Option<String>,
+    pub script_address: String,
+    pub spell_input_index: usize,
+    pub prevout_value: u64,
+    pub prevout_script_pubkey: String,
+}
 
 /// Adds spell data to a Bitcoin transaction by creating a committed spell output and spending it.
 ///
@@ -39,10 +51,10 @@ use std::{collections::BTreeMap, str::FromStr};
 /// Returns a tuple containing:
 /// 1. A vector of two transactions:
 ///    - `commit_tx` - Transaction that creates the committed spell Tapscript output
-///    - `spell_tx` - Modified input `tx` with added spell input (with witness data) and change output.
-/// 2. The hex-encoded tapscript string
+///    - `spell_tx` - Modified input `tx` with added spell input (WITHOUT witness data) and change output.
+/// 2. Script signing information for client to sign the transaction
 ///
-/// Both transactions need to be signed before broadcasting.
+/// The spell_tx is unsigned and needs to be signed by the client using the script_signing_info.
 pub fn add_spell(
     tx: Transaction,
     spell_data: &[u8],
@@ -53,10 +65,18 @@ pub fn add_spell(
     prev_txs: &BTreeMap<TxId, Tx>,
     charms_fee_pubkey: Option<ScriptBuf>,
     charms_fee: Amount,
-) -> (Vec<Transaction>, String) {
+    script_internal_pubkey: Option<XOnlyPublicKey>,
+) -> (Vec<Transaction>, ScriptSigningInfo) {
     let secp256k1 = Secp256k1::new();
-    let keypair = Keypair::new(&secp256k1, &mut thread_rng());
-    let (public_key, _) = XOnlyPublicKey::from_keypair(&keypair);
+
+    // Use provided pubkey or generate a random one
+    let public_key = if let Some(pk) = script_internal_pubkey {
+        pk
+    } else {
+        let keypair = Keypair::new(&secp256k1, &mut thread_rng());
+        let (pk, _) = XOnlyPublicKey::from_keypair(&keypair);
+        pk
+    };
 
     let script = data_script(public_key, &spell_data);
 
@@ -89,32 +109,26 @@ pub fn add_spell(
     );
     let spell_input_idx = tx.input.len() - 1;
 
-    let signature = create_tx_signature(keypair, &mut tx, spell_input_idx, &commit_txout, &script);
+    // Generate spend_info for control block and merkle root
+    let spend_info = taproot_spend_info(public_key, script.clone());
+    let script_address = bitcoin::Address::p2tr(&secp256k1, public_key, spend_info.merkle_root(), bitcoin::Network::Bitcoin);
+    let control_block = spend_info.control_block(&(script.clone(), bitcoin::taproot::LeafVersion::TapScript)).unwrap();
+    let merkle_root = spend_info.merkle_root();
 
-    // Encode script to hex before moving it
-    let tapscript_hex = hex::encode(&script);
+    // Create signing info for client
+    let script_signing_info = ScriptSigningInfo {
+        tapscript: hex::encode(&script),
+        control_block: hex::encode(&control_block.serialize()),
+        internal_pubkey: hex::encode(public_key.serialize()),
+        merkle_root: merkle_root.map(|hash| hex::encode(hash.as_ref() as &[u8])),
+        script_address: script_address.to_string(),
+        spell_input_index: spell_input_idx,
+        prevout_value: commit_txout.value.to_sat(),
+        prevout_script_pubkey: hex::encode(commit_txout.script_pubkey.as_bytes()),
+    };
 
-    append_witness_data(
-        &mut tx.input[spell_input_idx].witness,
-        public_key,
-        script,
-        signature,
-    );
-
-    dbg!((
-        tx.input[0].witness.size(),
-        tx.input[0].base_size(),
-        tx.input[0].total_size()
-    ));
-    dbg!((
-        script_len,
-        tx.input[spell_input_idx].witness.size(),
-        tx.input[spell_input_idx].base_size(),
-        tx.input[spell_input_idx].total_size()
-    ));
-    dbg!(tx.output[tx.output.len() - 1].size());
-
-    ([commit_tx, tx].to_vec(), tapscript_hex)
+    // Return unsigned transactions (without witness data on spell input)
+    ([commit_tx, tx].to_vec(), script_signing_info)
 }
 
 /// fee covering only the marginal cost of spending the committed spell output.
@@ -194,49 +208,6 @@ fn modify_tx(
             script_pubkey: change_script_pubkey,
         });
     }
-}
-
-fn create_tx_signature(
-    keypair: Keypair,
-    tx: &mut Transaction,
-    input_index: usize,
-    prev_out: &TxOut,
-    script: &ScriptBuf,
-) -> schnorr::Signature {
-    let mut sighash_cache = SighashCache::new(tx);
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            input_index,
-            &Prevouts::One(input_index, prev_out),
-            TapLeafHash::from_script(script, LeafVersion::TapScript),
-            TapSighashType::AllPlusAnyoneCanPay,
-        )
-        .unwrap();
-    let secp256k1 = Secp256k1::new();
-    let signature = secp256k1.sign_schnorr(
-        &Message::from_digest_slice(sighash.as_ref())
-            .expect("should be cryptographically secure hash"),
-        &keypair,
-    );
-
-    signature
-}
-
-fn append_witness_data(
-    witness: &mut Witness,
-    public_key: XOnlyPublicKey,
-    script: ScriptBuf,
-    signature: schnorr::Signature,
-) {
-    witness.push(
-        taproot::Signature {
-            signature,
-            sighash_type: TapSighashType::AllPlusAnyoneCanPay,
-        }
-        .to_vec(),
-    );
-    witness.push(script.clone());
-    witness.push(control_block(public_key, script).serialize());
 }
 
 pub fn tx_total_amount_in(prev_txs: &BTreeMap<TxId, Tx>, tx: &Transaction) -> Amount {
@@ -323,7 +294,8 @@ pub fn make_transactions(
     fee_rate: f64,
     charms_fee: Option<CharmsFee>,
     total_cycles: u64,
-) -> anyhow::Result<(Vec<Tx>, String)> {
+    script_internal_pubkey: Option<XOnlyPublicKey>,
+) -> anyhow::Result<(Vec<Tx>, ScriptSigningInfo)> {
     let change_address = bitcoin::Address::from_str(&change_address)?;
 
     let network = match &change_address {
@@ -357,7 +329,7 @@ pub fn make_transactions(
     let tx = from_spell(&spell)?;
 
     // Call the add_spell function
-    let (transactions, tapscript_hex) = add_spell(
+    let (transactions, script_signing_info) = add_spell(
         tx.0,
         spell_data,
         funding_utxo,
@@ -367,11 +339,12 @@ pub fn make_transactions(
         &prev_txs_by_id,
         charms_fee_pubkey,
         charms_fee,
+        script_internal_pubkey,
     );
 
     let txs = transactions
         .into_iter()
         .map(|tx| Tx::Bitcoin(BitcoinTx(tx)))
         .collect();
-    Ok((txs, tapscript_hex))
+    Ok((txs, script_signing_info))
 }

@@ -1,6 +1,6 @@
 use crate::{
     cli,
-    cli::{BITCOIN, CARDANO, SpellCheckParams, SpellProveParams},
+    cli::{SpellCheckParams, SpellProveParams},
     spell::{ProveRequest, ProveSpellTx, ProveSpellTxImpl, Spell, ensure_no_zero_amounts},
 };
 use anyhow::{Result, ensure};
@@ -85,24 +85,8 @@ impl Prove for SpellCli {
         };
         let prove_response = spell_prover.prove_spell_tx(prove_request).await?;
 
-        match chain.as_str() {
-            BITCOIN => {
-                // Print JSON array of transaction hexes
-                println!("{}", serde_json::to_string(&prove_response.txs)?);
-            }
-            CARDANO => {
-                let Some(tx_hex) = prove_response.txs.into_iter().next() else {
-                    unreachable!()
-                };
-                let tx_draft = json!({
-                    "type": "Unwitnessed Tx ConwayEra",
-                    "description": "Ledger Cddl Format",
-                    "cborHex": tx_hex,
-                });
-                println!("{}", tx_draft);
-            }
-            _ => unreachable!(),
-        }
+        // Print spell_data hex
+        println!("{}", serde_json::to_string(&prove_response)?);
 
         Ok(())
     }
