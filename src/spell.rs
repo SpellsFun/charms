@@ -607,7 +607,7 @@ pub trait ProveSpellTx: Send + Sync {
     fn prove_spell_tx(
         &self,
         prove_request: ProveRequest,
-    ) -> impl Future<Output = anyhow::Result<Vec<String>>>;
+    ) -> impl Future<Output = anyhow::Result<ProveResponse>>;
 }
 
 pub struct ProveSpellTxImpl {
@@ -661,6 +661,13 @@ pub struct ProveRequest {
     pub chain: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProveResponse {
+    pub txs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tapscript: Option<String>,
+}
+
 pub struct Prover {
     pub spell_prover_client: Arc<Shared<BoxedSP1Prover>>,
     pub wrapper_prover_client: Arc<Shared<BoxedSP1Prover>>,
@@ -694,7 +701,7 @@ impl ProveSpellTxImpl {
         &self,
         prove_request: ProveRequest,
         app_cycles: u64,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<ProveResponse> {
         let total_app_cycles = app_cycles;
         let ProveRequest {
             spell,
@@ -735,7 +742,7 @@ impl ProveSpellTxImpl {
 
         match chain.as_str() {
             BITCOIN => {
-                let txs = bitcoin_tx::make_transactions(
+                let (txs, tapscript) = bitcoin_tx::make_transactions(
                     &spell,
                     funding_utxo,
                     funding_utxo_value,
@@ -746,7 +753,10 @@ impl ProveSpellTxImpl {
                     charms_fee,
                     total_cycles,
                 )?;
-                Ok(to_hex_txs(&txs))
+                Ok(ProveResponse {
+                    txs: to_hex_txs(&txs),
+                    tapscript: Some(tapscript),
+                })
             }
             CARDANO => {
                 let txs = cardano_tx::make_transactions(
@@ -759,7 +769,10 @@ impl ProveSpellTxImpl {
                     charms_fee,
                     total_cycles,
                 )?;
-                Ok(to_hex_txs(&txs))
+                Ok(ProveResponse {
+                    txs: to_hex_txs(&txs),
+                    tapscript: None,
+                })
             }
             _ => bail!("unsupported chain: {}", chain),
         }
@@ -808,7 +821,7 @@ pub enum ProofState {
     },
     Done {
         request_data: RequestData,
-        result: Vec<String>,
+        result: ProveResponse,
     },
 }
 
@@ -865,7 +878,7 @@ impl ProveSpellTx for ProveSpellTxImpl {
     }
 
     #[cfg(feature = "prover")]
-    async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<Vec<String>> {
+    async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<ProveResponse> {
         let (norm_spell, app_cycles) = self.validate_prove_request(&prove_request)?;
 
         if let Some((cache_client, lock_manager)) = self.cache_client.as_ref() {
@@ -889,7 +902,7 @@ impl ProveSpellTx for ProveSpellTxImpl {
                     let mut con = con.clone();
                     let request_key = request_key.clone();
 
-                    let result: Vec<String> = lock_manager
+                    let result: ProveResponse = lock_manager
                         .using(lock_key.as_bytes(), LOCK_TTL, || async move {
                             match con.get(request_key.as_str()).await? {
                                 Some(ProofState::Done { request_data, .. })
@@ -913,7 +926,7 @@ impl ProveSpellTx for ProveSpellTxImpl {
                                 },
                             ))?;
 
-                            let r: Vec<String> =
+                            let r: ProveResponse =
                                 self.do_prove_spell_tx(prove_request, app_cycles)?;
 
                             let _: () = block_on(con.set(
@@ -942,7 +955,7 @@ impl ProveSpellTx for ProveSpellTxImpl {
 
     #[cfg(not(feature = "prover"))]
     #[tracing::instrument(level = "info", skip_all)]
-    async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<Vec<String>> {
+    async fn prove_spell_tx(&self, prove_request: ProveRequest) -> anyhow::Result<ProveResponse> {
         let (_norm_spell, app_cycles) = self.validate_prove_request(&prove_request)?;
         if self.mock {
             return Self::do_prove_spell_tx(self, prove_request, app_cycles);
@@ -966,8 +979,8 @@ impl ProveSpellTx for ProveSpellTxImpl {
             let body = response.text().await?;
             bail!("client error: {}: {}", status, body);
         }
-        let txs: Vec<String> = response.json().await?;
-        Ok(txs)
+        let prove_response: ProveResponse = response.json().await?;
+        Ok(prove_response)
     }
 }
 

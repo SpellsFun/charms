@@ -36,10 +36,11 @@ use std::{collections::BTreeMap, str::FromStr};
 /// * `charms_fee` - Amount of charms fee to pay
 ///
 /// # Returns
-/// Returns a vector containing two transactions:
-/// 1. `commit_tx` - Transaction that creates the committed spell Tapscript output
-/// 2. `spell_tx` - Modified input `tx` with added spell input (with witness data) and change
-///    output.
+/// Returns a tuple containing:
+/// 1. A vector of two transactions:
+///    - `commit_tx` - Transaction that creates the committed spell Tapscript output
+///    - `spell_tx` - Modified input `tx` with added spell input (with witness data) and change output.
+/// 2. The hex-encoded tapscript string
 ///
 /// Both transactions need to be signed before broadcasting.
 pub fn add_spell(
@@ -57,45 +58,7 @@ pub fn add_spell(
     let keypair = Keypair::new(&secp256k1, &mut thread_rng());
     let (public_key, _) = XOnlyPublicKey::from_keypair(&keypair);
 
-    // 🔑 输出生成的私钥和公钥 - 用于调试和验证
-    let secret_bytes = keypair.secret_bytes();
-
-    // 使用简单的方式将字节转换为十六进制字符串
-    let private_key_hex = secret_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-    let public_key_hex = public_key.serialize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
-
-    tracing::info!("🔑 Generated Spell Private Key: {}", private_key_hex);
-    tracing::info!("🔑 Generated X-only Public Key: {}", public_key_hex);
-
     let script = data_script(public_key, &spell_data);
-
-    // 计算将要创建的脚本地址
-    let spend_info = taproot_spend_info(public_key, script.clone());
-    let script_address = bitcoin::Address::p2tr(&secp256k1, public_key, spend_info.merkle_root(), bitcoin::Network::Bitcoin);
-    tracing::info!("🏠 Generated Script Address: {}", script_address);
-
-    // 生成完整的脚本信息用于客户端
-    let control_block = spend_info.control_block(&(script.clone(), bitcoin::taproot::LeafVersion::TapScript)).unwrap();
-    let merkle_root = spend_info.merkle_root();
-
-    println!("=== SPELL TRANSACTION DEBUG INFO ===");
-    println!("🔑 Private Key: {}", private_key_hex);
-    println!("🔑 X-only Public Key: {}", public_key_hex);
-    println!("🏠 Script Address: {}", script_address);
-    println!("📜 Spell Data Length: {} bytes", spell_data.len());
-    println!("=====================================");
-
-    // 为客户端提供完整的脚本信息
-    println!("=== CLIENT SCRIPT INFO ===");
-    println!("🔧 Tapscript: {}", hex::encode(&script));
-    println!("🔧 Control Block: {}", hex::encode(&control_block.serialize()));
-    println!("🔧 Internal Pubkey: {}", public_key_hex);
-    println!("🔧 Merkle Root: {}",
-        merkle_root.map(|hash| hex::encode(hash.as_ref() as &[u8]))
-                   .unwrap_or_else(|| "None".to_string()));
-    println!("🔧 Script Address: {}", script_address);
-    println!("🔧 Network: bitcoin");
-    println!("===========================");
 
     let commit_tx = create_commit_tx(
         funding_out_point,
@@ -128,6 +91,9 @@ pub fn add_spell(
 
     let signature = create_tx_signature(keypair, &mut tx, spell_input_idx, &commit_txout, &script);
 
+    // Encode script to hex before moving it
+    let tapscript_hex = hex::encode(&script);
+
     append_witness_data(
         &mut tx.input[spell_input_idx].witness,
         public_key,
@@ -148,7 +114,7 @@ pub fn add_spell(
     ));
     dbg!(tx.output[tx.output.len() - 1].size());
 
-    [commit_tx, tx].to_vec()
+    ([commit_tx, tx].to_vec(), tapscript_hex)
 }
 
 /// fee covering only the marginal cost of spending the committed spell output.
@@ -357,7 +323,7 @@ pub fn make_transactions(
     fee_rate: f64,
     charms_fee: Option<CharmsFee>,
     total_cycles: u64,
-) -> anyhow::Result<Vec<Tx>> {
+) -> anyhow::Result<(Vec<Tx>, String)> {
     let change_address = bitcoin::Address::from_str(&change_address)?;
 
     let network = match &change_address {
@@ -391,10 +357,7 @@ pub fn make_transactions(
     let tx = from_spell(&spell)?;
 
     // Call the add_spell function
-    println!("🚀 Creating spell transactions for funding UTXO: {}", funding_utxo);
-    println!("💰 Funding UTXO value: {} sats", funding_utxo_value);
-
-    let transactions = add_spell(
+    let (transactions, tapscript_hex) = add_spell(
         tx.0,
         spell_data,
         funding_utxo,
@@ -406,16 +369,9 @@ pub fn make_transactions(
         charms_fee,
     );
 
-    println!("✅ Spell transactions created successfully!");
-    println!("📦 Total transactions: {}", transactions.len());
-    if transactions.len() >= 2 {
-        println!("🔗 Commit TX ID: {}", transactions[0].compute_txid());
-        println!("🔗 Spell TX ID: {}", transactions[1].compute_txid());
-    }
-    println!("=== END SPELL TRANSACTION DEBUG ===\n");
-
-    Ok(transactions
+    let txs = transactions
         .into_iter()
         .map(|tx| Tx::Bitcoin(BitcoinTx(tx)))
-        .collect())
+        .collect();
+    Ok((txs, tapscript_hex))
 }

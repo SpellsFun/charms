@@ -83,18 +83,15 @@ impl Prove for SpellCli {
             fee_rate,
             chain: chain.clone(),
         };
-        let transactions = spell_prover.prove_spell_tx(prove_request).await?;
+        let prove_response = spell_prover.prove_spell_tx(prove_request).await?;
 
         match chain.as_str() {
             BITCOIN => {
-                // Convert transactions to hex and create JSON array
-                let hex_txs: Vec<String> = transactions;
-
                 // Print JSON array of transaction hexes
-                println!("{}", serde_json::to_string(&hex_txs)?);
+                println!("{}", serde_json::to_string(&prove_response.txs)?);
             }
             CARDANO => {
-                let Some(tx_hex) = transactions.into_iter().next() else {
+                let Some(tx_hex) = prove_response.txs.into_iter().next() else {
                     unreachable!()
                 };
                 let tx_draft = json!({

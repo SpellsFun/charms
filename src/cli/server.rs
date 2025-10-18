@@ -1,6 +1,6 @@
 use crate::{
     cli::ServerConfig,
-    spell::{ProveRequest, ProveSpellTx, ProveSpellTxImpl},
+    spell::{ProveRequest, ProveResponse, ProveSpellTx, ProveSpellTxImpl},
     utils::TRANSIENT_PROVER_FAILURE,
 };
 use anyhow::Result;
@@ -94,7 +94,7 @@ async fn prove_spell(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Json(payload): Json<ProveRequest>,
-) -> Result<Json<Vec<String>>, (StatusCode, Json<String>)> {
+) -> Result<Json<ProveResponse>, (StatusCode, Json<String>)> {
     if let Some(expected_token) = state.auth_token.as_ref() {
         let provided = headers
             .get(AUTHORIZATION)
